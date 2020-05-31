@@ -1,0 +1,219 @@
+###############
+# LOAD PACKAGES
+###############
+
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(janitor)
+library(lubridate)
+
+library(maps)
+library(mapdata)
+library(ggmap)
+
+library(sf)
+library(spatialEco)
+library(taRifx)
+
+#################################
+#   CLEAN CDC MORT DATA
+#################################
+
+# READ IN TAB DELIMITED FILE
+cdc_california_1999_2018 <- read_delim("~/Documents/big_enviro/data/cdc_california_1999_2018.txt", 
+                                       "\t", escape_double = FALSE, col_types = cols(`Month Code` = col_date(format = "%Y/%m")), trim_ws = TRUE)
+
+# PUT VAR NAMES IN LOWERCASE
+cdc_california_1999_2018 <- clean_names(cdc_california_1999_2018)
+
+# EXTRACT YEAR AND MONTH FROM DATE VARIABLE
+cdc_california_1999_2018 <- mutate(cdc_california_1999_2018, year=year(month_code), month=month(month_code))
+
+# EXTRACT YEAR AND MONTH FROM DATE VARIABLE
+cdc_california_1999_2018 <- select(cdc_california_1999_2018, county_code, deaths, year, month)
+
+#################################
+#   CLEAN CDC POP DATA
+#################################
+
+
+pop_california_1990_2018 <- read_delim("Documents/big_enviro/data/pop_california_1990_2018.txt", 
+                                       "\t", escape_double = FALSE, trim_ws = TRUE)
+
+pop_california_1990_2018 <- clean_names(pop_california_1990_2018)
+
+pop_california_1990_2018 <- rename(pop_california_1990_2018, year=yearly_july_1st_estimates)
+
+pop_california_1990_2018 <- select(pop_california_1990_2018, county_code, year, population)
+
+pop_california_1999_2018 <- filter(pop_california_1990_2018, year>=1999)
+
+cdc_pop_1999_2018 <- full_join(pop_california_1999_2018, 
+                               cdc_california_1999_2018, 
+                               by = c("county_code", "year"))
+
+cdc_pop_1999_2018 <- mutate(cdc_pop_1999_2018, county_code=destring(county_code), population=destring(population), deaths=destring(deaths))
+
+cdc_pop_1999_2018 <- mutate(cdc_pop_1999_2018, countyfip=county_code-6000)
+
+cdc_pop_1999_2018 <- mutate(cdc_pop_1999_2018, deathrate=deaths/population*100000)
+
+summary(cdc_pop_1999_2018$deathrate)
+
+
+#####################
+#  GET WEATHER DATA
+#####################
+
+ghcn_california_1999_2019 <- read_csv("~/Documents/big_enviro/data/ghcn/ghcn_california_1999_2019.csv", 
+                                      col_types = cols(DATE = col_date(format = "%Y-%m-%d")))
+
+ghcn_california_1999_2019 <- clean_names(ghcn_california_1999_2019)
+
+ghcn_california_1999_2019 <- select(ghcn_california_1999_2019, -name, -latitude, -longitude, -elevation)
+
+#Create year and month variable
+ghcn_california_1999_2019 <- mutate(ghcn_california_1999_2019, year=year(date), month=month(date))
+
+#DROP 2019 since we don't have mortality data for this year
+ghcn_california_1999_2018 <- filter(ghcn_california_1999_2019, year<2019)
+
+summary(ghcn_california_1999_2018$tmax)
+
+#####################
+#  IMPORT STATION-COUNTY CROSSWALK
+#####################
+
+crosswalk_100km <- read_csv("~/Documents/big_enviro/data/station_county_crosswalk_100km.csv")
+
+#####################
+#  JOIN WEATHER DATA WITH COUNTY CROSSWALK
+#####################
+
+ghcn_stn_100km <- full_join(crosswalk_100km, ghcn_california_1999_2018, by = "station")
+
+################
+#INVERSE DISTANCE WEIGHTS
+################
+
+ghcn_stn_100km <- mutate(ghcn_stn_100km, invdist=1/distance)
+
+#######################
+# SUMMARISE WEATHER COUNTY-YEAR-MONTH AVERAGE
+#######################
+
+#GROUP
+ghcn_stn_100km <- group_by(ghcn_stn_100km, countyfip, year, month)
+
+#SUMMARISE
+ghcn_county_100km <- summarise(ghcn_stn_100km, 
+                               tmax=weighted.mean(tmax, invdist, na.rm = TRUE))
+
+#UNGROUP
+ghcn_stn_100km <- ungroup(ghcn_stn_100km)
+
+write_csv(ghcn_county_100km, "~/Documents/big_enviro/data/ghcn_county_100km_california_1999_2018.csv")
+
+#####################
+#  JOIN WITH CDC DATA AT COUNTY-YEAR-MONTH 
+#####################
+
+cdc_ghcn_100km <- full_join(ghcn_county_100km, 
+                            cdc_pop_1999_2018, 
+                            by = c("countyfip", "year", "month"))
+
+write_csv(cdc_ghcn_100km, "~/Documents/big_enviro/data/cdc_ghcn_100km_california_1999_2018.csv")
+
+#####################
+# SCATTERPLOT - ALL OBSERVATIONS
+#####################
+ggplot(cdc_ghcn_100km, aes(y=deathrate, x=tmax, size=population, weight=population))  + 
+  geom_point(color="dark gray") +
+  geom_smooth(method = lm, se = FALSE, color="black", size=1) +
+  labs(y = "Death rate", x = "Max temperature") +
+  theme(panel.background = element_rect(fill="white"), 
+        legend.position = "none",
+        axis.line = element_line(colour = "black") )
+
+#####################
+# SCATTERPLOT - AUGUSTS ONLY
+#####################
+ggplot(filter(cdc_ghcn_100km, month==8), aes(y=deathrate, x=tmax,size=population, weight=population)) + 
+  geom_point(color="dark gray") +
+  geom_smooth(method = lm, se = FALSE, color="black", size=1) +
+  labs(y = "Death rate", x = "Max temperature") +
+  theme(panel.background = element_rect(fill="white"),
+        legend.position = "none",
+        axis.line = element_line(colour = "black") )
+
+#####################
+# SCATTERPLOT - LA AUGUSTS ONLY
+#####################
+ggplot(filter(cdc_ghcn_100km, month==8 & countyfip==37), aes(y=deathrate, x=tmax, size=population, weight=population)) + 
+  geom_point(color="dark gray") +
+  geom_smooth(method = lm, se = FALSE, color="black", size=1) +
+  labs(y = "Death rate", x = "Max temperature") +
+  theme(panel.background = element_rect(fill="white"),
+        legend.position = "none",
+        axis.line = element_line(colour = "black") )
+
+#####################
+#  REGRESSIONS
+#####################
+
+sink("~/Documents/big_enviro/output/log_tutorial14.txt")
+
+#ALL OBSERVATIONS
+regression1 <- lm(deathrate ~ tmax, data=cdc_ghcn_100km, weight=population)
+summary(regression1)
+
+#AUGUST ONLY
+regression2 <- lm(deathrate ~ tmax, data=filter(cdc_ghcn_100km, month==8), weight=population)
+summary(regression2)
+
+#LOS ANGELES + AUGUST ONLY
+regression3 <- lm(deathrate ~ tmax, data=filter(cdc_ghcn_100km, month==8 & countyfip==37), weight=population)
+summary(regression3)
+
+sink()
+
+######################
+# TUTORIAL 15 ADDED CODE
+######################
+
+# SCATTERPLOT
+ggplot(filter(cdc_ghcn_100km, (countyfip==37 | countyfip==83 | countyfip==19) & month==8), aes(y=deathrate, x=tmax, color=factor(countyfip))) + 
+  geom_point() +
+  labs(y = "Death rate", x = "Max temperature") +
+  scale_colour_manual(values=c("blue", "red","green")) +
+  theme(panel.background = element_rect(fill="white"),
+        legend.position = "none",
+        axis.line = element_line(colour = "black"))
+
+# AVERAGES FOR EACH COUNTY-MONTH
+cdc_ghcn_100km <- group_by(cdc_ghcn_100km, countyfip, month)
+cdc_ghcn_100km <- mutate(cdc_ghcn_100km, tmax_avg=weighted.mean(tmax, population, na.rm = TRUE), deathrate_avg=weighted.mean(deathrate, population, na.rm = TRUE))
+
+# DIFFERENCES FROM THE MEAN
+cdc_ghcn_100km <- mutate(cdc_ghcn_100km, tmax_dev=tmax-tmax_avg, deathrate_dev=deathrate-deathrate_avg)
+cdc_ghcn_100km <- ungroup(cdc_ghcn_100km)
+
+# THREE COUNTIES ONLY -- LA + SB + FRESNO  -- DEVIATIONS
+ggplot(filter(cdc_ghcn_100km, (countyfip==37 | countyfip==83 | countyfip==19) & month==8), aes(y=deathrate_dev, x=tmax_dev, color=factor(countyfip))) + 
+  geom_point() +
+  labs(y = "Death rate", x = "Max temperature") +
+  scale_colour_manual(values=c("blue", "red","green")) +
+  theme(panel.background = element_rect(fill="white"),
+        legend.position = "none",
+        axis.line = element_line(colour = "black"))
+
+# DEMEANED + AUGUST ONLY
+regression4 <- lm(deathrate_dev ~ tmax_dev, data=filter(cdc_ghcn_100km, month==8),weight=population)
+summary(regression4)
+
+# FIXED EFFECT FOR COUNTY + AUGUST ONLY
+regression5 <- lm(deathrate ~ tmax + factor(countyfip), data=filter(cdc_ghcn_100km, month==8), weight=population)
+summary(regression5)
+
+
